@@ -7,6 +7,7 @@ import { LlmIR } from "../ir/llm-ir.ts";
 import { getModelFromConfig, assertKeyForModel, ModelConfig } from "../config.ts";
 import { LoadedTools, loadTools } from "../tools/index.ts";
 import { t, toTypescript } from "structural";
+import { useBackgroundAgentsStore } from "./background-store.ts";
 
 // Global flag to track if we're inside a subagent context
 let subagentDepth = 0;
@@ -33,6 +34,8 @@ type RunSubagentParams = {
   transport: Transport;
   config: Config;
   modelOverride: string | null;
+  /** Optional: ID for background agent to receive streaming updates */
+  backgroundAgentId?: string;
 };
 
 /**
@@ -51,6 +54,7 @@ export async function runSubagent({
   transport,
   config,
   modelOverride,
+  backgroundAgentId,
 }: RunSubagentParams): Promise<SubagentResult> {
   if (!canSpawnSubagent()) {
     return {
@@ -62,6 +66,9 @@ export async function runSubagent({
 
   // Increment depth to prevent nested subagent spawning
   subagentDepth++;
+
+  // Get store for streaming updates (if background agent)
+  const store = backgroundAgentId ? useBackgroundAgentsStore.getState() : null;
 
   try {
     // Get model - use agent's model preference or fall back to config
@@ -79,6 +86,8 @@ export async function runSubagent({
     // Collect response
     let responseContent = "";
     let reasoningContent = "";
+    let lastStreamUpdate = 0;
+    const STREAM_THROTTLE_MS = 100; // Throttle UI updates
 
     const finish = await trajectoryArc({
       apiKey,
@@ -88,17 +97,44 @@ export async function runSubagent({
       transport,
       abortSignal: signal,
       handler: {
-        startResponse: () => {},
+        startResponse: () => {
+          if (store && backgroundAgentId) {
+            store.updateAgent(backgroundAgentId, { streamingContent: "" });
+          }
+        },
         responseProgress: event => {
           if (event.buffer.content) responseContent = event.buffer.content;
           if (event.buffer.reasoning) reasoningContent = event.buffer.reasoning;
+
+          // Send streaming updates to UI (throttled)
+          if (store && backgroundAgentId) {
+            const now = Date.now();
+            if (now - lastStreamUpdate > STREAM_THROTTLE_MS) {
+              store.updateAgent(backgroundAgentId, {
+                streamingContent: event.buffer.content || event.buffer.reasoning || "",
+              });
+              lastStreamUpdate = now;
+            }
+          }
         },
         startCompaction: () => {},
         compactionProgress: () => {},
         compactionParsed: () => {},
         autofixingJson: () => {},
         autofixingDiff: () => {},
-        retryTool: () => {},
+        retryTool: event => {
+          // Track tool execution
+          if (store && backgroundAgentId && event.irs.length > 0) {
+            const lastIr = event.irs[event.irs.length - 1];
+            if ("toolName" in lastIr && lastIr.toolName) {
+              store.setToolCall(backgroundAgentId, {
+                name: lastIr.toolName,
+                status: "running",
+                startTime: Date.now(),
+              });
+            }
+          }
+        },
       },
       // Custom system prompt and tools for the subagent
       customSystemPrompt: async () => {
@@ -112,6 +148,11 @@ export async function runSubagent({
       },
       customTools: filteredTools,
     });
+
+    // Clear current tool call when done
+    if (store && backgroundAgentId) {
+      store.setToolCall(backgroundAgentId, undefined);
+    }
 
     // Process result
     const historyItems = outputToHistory(finish.irs);

@@ -1,6 +1,24 @@
 import { create } from "zustand";
 
 /**
+ * Tool call being executed by a subagent
+ */
+export type AgentToolCall = {
+  name: string;
+  status: "pending" | "running" | "completed" | "failed";
+  startTime?: number;
+};
+
+/**
+ * Pending question from subagent to user
+ */
+export type AgentQuestion = {
+  id: string;
+  question: string;
+  resolve: (answer: string) => void;
+};
+
+/**
  * Background agent state - shared between task tool and UI.
  */
 export type BackgroundAgent = {
@@ -8,12 +26,21 @@ export type BackgroundAgent = {
   agentName: string;
   description: string;
   task: string;
-  status: "running" | "completed" | "failed";
+  status: "running" | "waiting_for_user" | "completed" | "failed";
   outputFile: string;
   startTime: number;
   endTime?: number;
   output?: string;
   error?: string;
+
+  // Streaming progress
+  streamingContent?: string;
+  currentToolCall?: AgentToolCall;
+  toolHistory?: AgentToolCall[];
+
+  // User interaction
+  pendingQuestion?: AgentQuestion;
+  userMessages?: string[];
 };
 
 export type BackgroundAgentsState = {
@@ -31,6 +58,14 @@ export type BackgroundAgentsState = {
   hidePanel: () => void;
   selectNextAgent: () => void;
   selectPrevAgent: () => void;
+
+  // Streaming updates
+  appendStreamingContent: (id: string, content: string) => void;
+  setToolCall: (id: string, toolCall: AgentToolCall | undefined) => void;
+
+  // User interaction
+  answerQuestion: (agentId: string, answer: string) => void;
+  sendUserMessage: (agentId: string, message: string) => void;
 };
 
 export const useBackgroundAgentsStore = create<BackgroundAgentsState>((set, get) => ({
@@ -119,6 +154,85 @@ export const useBackgroundAgentsStore = create<BackgroundAgentsState>((set, get)
     const currentIndex = selectedAgentId ? agentIds.indexOf(selectedAgentId) : 0;
     const prevIndex = (currentIndex - 1 + agentIds.length) % agentIds.length;
     set({ selectedAgentId: agentIds[prevIndex] });
+  },
+
+  appendStreamingContent: (id, content) => {
+    set(state => {
+      const agent = state.agents.get(id);
+      if (!agent) return state;
+
+      const newAgents = new Map(state.agents);
+      newAgents.set(id, {
+        ...agent,
+        streamingContent: (agent.streamingContent || "") + content,
+      });
+      return { agents: newAgents };
+    });
+  },
+
+  setToolCall: (id, toolCall) => {
+    set(state => {
+      const agent = state.agents.get(id);
+      if (!agent) return state;
+
+      const newAgents = new Map(state.agents);
+      const toolHistory = agent.toolHistory || [];
+
+      // If completing a tool call, add to history
+      if (agent.currentToolCall && (!toolCall || toolCall.name !== agent.currentToolCall.name)) {
+        toolHistory.push({ ...agent.currentToolCall, status: "completed" });
+      }
+
+      newAgents.set(id, {
+        ...agent,
+        currentToolCall: toolCall,
+        toolHistory,
+      });
+      return { agents: newAgents };
+    });
+  },
+
+  answerQuestion: (agentId, answer) => {
+    const agent = get().agents.get(agentId);
+    if (!agent?.pendingQuestion) return;
+
+    // Resolve the pending promise
+    agent.pendingQuestion.resolve(answer);
+
+    // Update state
+    set(state => {
+      const ag = state.agents.get(agentId);
+      if (!ag) return state;
+
+      const newAgents = new Map(state.agents);
+      newAgents.set(agentId, {
+        ...ag,
+        status: "running",
+        pendingQuestion: undefined,
+        userMessages: [
+          ...(ag.userMessages || []),
+          `Q: ${ag.pendingQuestion?.question}`,
+          `A: ${answer}`,
+        ],
+      });
+      return { agents: newAgents };
+    });
+  },
+
+  sendUserMessage: (agentId, message) => {
+    set(state => {
+      const agent = state.agents.get(agentId);
+      if (!agent) return state;
+
+      const newAgents = new Map(state.agents);
+      newAgents.set(agentId, {
+        ...agent,
+        userMessages: [...(agent.userMessages || []), `User: ${message}`],
+      });
+      return { agents: newAgents };
+    });
+    // Note: Actually injecting user message into subagent would require
+    // more complex architecture (message queue, etc.)
   },
 }));
 

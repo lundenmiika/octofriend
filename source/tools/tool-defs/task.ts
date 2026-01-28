@@ -148,6 +148,7 @@ The subagent cannot spawn other subagents (max depth = 1).`,
               transport,
               config,
               modelOverride: effectiveModelOverride,
+              backgroundAgentId: agentId, // Enable streaming updates
             });
 
             const endTime = Date.now();

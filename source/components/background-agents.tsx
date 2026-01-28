@@ -148,12 +148,14 @@ function AgentTab({
 
   const statusIcon = {
     running: "◐",
+    waiting_for_user: "?",
     completed: "✓",
     failed: "✗",
   }[agent.status];
 
   const statusColor = {
     running: "cyan",
+    waiting_for_user: "yellow",
     completed: "green",
     failed: "red",
   }[agent.status];
@@ -175,6 +177,16 @@ function AgentDetails({ agent }: { agent: BackgroundAgent }) {
     ? ((agent.endTime - agent.startTime) / 1000).toFixed(1)
     : ((Date.now() - agent.startTime) / 1000).toFixed(1);
 
+  // Determine what status color to use
+  const statusColor =
+    agent.status === "running"
+      ? "cyan"
+      : agent.status === "waiting_for_user"
+        ? "yellow"
+        : agent.status === "completed"
+          ? "green"
+          : "red";
+
   return (
     <Box flexDirection="column">
       {/* Header */}
@@ -191,11 +203,7 @@ function AgentDetails({ agent }: { agent: BackgroundAgent }) {
       <Box gap={2}>
         <Text>
           Status:{" "}
-          <Text
-            color={
-              agent.status === "running" ? "cyan" : agent.status === "completed" ? "green" : "red"
-            }
-          >
+          <Text color={statusColor}>
             {agent.status}
             {agent.status === "running" && (
               <>
@@ -205,9 +213,23 @@ function AgentDetails({ agent }: { agent: BackgroundAgent }) {
             )}
           </Text>
         </Text>
+        {agent.currentToolCall && (
+          <Text>
+            <Text dimColor>Tool:</Text>{" "}
+            <Text color="cyan">
+              {agent.currentToolCall.name} <Spinner type="dots" />
+            </Text>
+          </Text>
+        )}
         <Text dimColor>Duration: {duration}s</Text>
-        <Text dimColor>ID: {agent.id}</Text>
       </Box>
+
+      {/* Tool history */}
+      {agent.toolHistory && agent.toolHistory.length > 0 && (
+        <Box marginTop={1}>
+          <Text dimColor>Tools used: {agent.toolHistory.map(t => t.name).join(" → ")}</Text>
+        </Box>
+      )}
 
       {/* Task */}
       <Box marginTop={1}>
@@ -216,7 +238,34 @@ function AgentDetails({ agent }: { agent: BackgroundAgent }) {
         </Text>
       </Box>
 
-      {/* Output or Error */}
+      {/* Streaming content (when running) */}
+      {agent.status === "running" && agent.streamingContent && (
+        <Box marginTop={1} flexDirection="column">
+          <Text bold color="cyan">
+            Progress:
+          </Text>
+          <Box paddingLeft={1} height={4} overflow="hidden">
+            <Text wrap="wrap" dimColor>
+              {truncate(agent.streamingContent, 300)}
+            </Text>
+          </Box>
+        </Box>
+      )}
+
+      {/* Pending question (waiting for user) */}
+      {agent.status === "waiting_for_user" && agent.pendingQuestion && (
+        <Box marginTop={1} flexDirection="column">
+          <Text bold color="yellow">
+            Agent is asking:
+          </Text>
+          <Box paddingLeft={1}>
+            <Text color="yellow">{agent.pendingQuestion.question}</Text>
+          </Box>
+          <Text dimColor>Type your answer and press Enter</Text>
+        </Box>
+      )}
+
+      {/* Final Output */}
       {agent.output && (
         <Box marginTop={1} flexDirection="column">
           <Text bold color={themeColor}>
@@ -228,6 +277,7 @@ function AgentDetails({ agent }: { agent: BackgroundAgent }) {
         </Box>
       )}
 
+      {/* Error */}
       {agent.error && (
         <Box marginTop={1} flexDirection="column">
           <Text bold color="red">
