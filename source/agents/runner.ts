@@ -6,8 +6,10 @@ import { toLlmIR, outputToHistory } from "../ir/convert-history-ir.ts";
 import { LlmIR } from "../ir/llm-ir.ts";
 import { getModelFromConfig, assertKeyForModel, ModelConfig } from "../config.ts";
 import { LoadedTools, loadTools } from "../tools/index.ts";
+import { ToolDef } from "../tools/common.ts";
 import { t, toTypescript } from "structural";
-import { useBackgroundAgentsStore } from "./background-store.ts";
+import { useBackgroundAgentsStore, AgentQuestion } from "./background-store.ts";
+import { randomUUID } from "crypto";
 
 // Global flag to track if we're inside a subagent context
 let subagentDepth = 0;
@@ -79,6 +81,11 @@ export async function runSubagent({
     // Load tools and filter based on agent's allowed tools
     const allTools = await loadTools(transport, signal, config);
     const filteredTools = filterToolsForAgent(allTools, agent);
+
+    // Inject ask-user tool for background agents to enable mid-flight queries
+    if (backgroundAgentId) {
+      (filteredTools as any)["ask_user"] = createAskUserTool(backgroundAgentId);
+    }
 
     // Create isolated history with just the task
     const history: LlmIR[] = [{ role: "user", content: task }];
@@ -271,6 +278,8 @@ ${toolDocs}
 - Be thorough but efficient
 - Return a clear, actionable summary of your findings or actions
 - You cannot spawn other subagents
+- If you are truly blocked and need user input, use the ask_user tool (if available)
+- Prefer making reasonable assumptions over asking questions - only ask when truly necessary
 
 # Current working directory
 ${pwd}
@@ -281,3 +290,75 @@ ${pwd}
 type LoadedToolsWithTask = LoadedTools & {
   task?: any;
 };
+
+/**
+ * Creates an ask-user tool for background agents to request user input.
+ * This allows subagents to pause and ask clarifying questions when stuck.
+ *
+ * The tool:
+ * - Sets agent status to "waiting_for_user"
+ * - Stores the question in pendingQuestion
+ * - Returns a promise that resolves when user answers
+ */
+function createAskUserTool(backgroundAgentId: string): ToolDef<any> {
+  const ArgumentsSchema = t.subtype({
+    question: t.str.comment("The question to ask the user"),
+    context: t.optional(t.str.comment("Additional context about why you need this information")),
+  });
+
+  const Schema = t
+    .subtype({
+      name: t.value("ask_user"),
+      arguments: ArgumentsSchema,
+    })
+    .comment(
+      `Ask the user a question and wait for their response.
+
+Use this tool when you are blocked and need clarification from the user.
+The agent will pause until the user provides an answer.
+
+Examples of when to use:
+- Ambiguous requirements that could be interpreted multiple ways
+- Need to choose between multiple valid approaches
+- Missing information that cannot be inferred
+- Confirmation before making significant changes
+
+Do NOT use this for:
+- Information you can find by reading files or searching
+- Questions that have obvious answers
+- Progress updates (the user can see your progress)`,
+    );
+
+  return {
+    Schema,
+    ArgumentsSchema,
+    async validate() {
+      return null;
+    },
+    async run(_signal, _transport, call) {
+      const { question, context } = call.arguments;
+      const store = useBackgroundAgentsStore.getState();
+
+      // Create a promise that will be resolved when user answers
+      return new Promise<{ content: string }>(resolve => {
+        const questionId = randomUUID();
+
+        const pendingQuestion: AgentQuestion = {
+          id: questionId,
+          question: context ? `${question}\n\nContext: ${context}` : question,
+          resolve: (answer: string) => {
+            resolve({
+              content: `User answered: ${answer}`,
+            });
+          },
+        };
+
+        // Update agent state to waiting and store the question
+        store.updateAgent(backgroundAgentId, {
+          status: "waiting_for_user",
+          pendingQuestion,
+        });
+      });
+    },
+  };
+}

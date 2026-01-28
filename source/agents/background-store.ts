@@ -45,11 +45,12 @@ export type BackgroundAgent = {
 
 export type BackgroundAgentsState = {
   agents: Map<string, BackgroundAgent>;
+  abortControllers: Map<string, AbortController>;
   selectedAgentId: string | null;
   panelVisible: boolean;
 
   // Actions
-  addAgent: (agent: BackgroundAgent) => void;
+  addAgent: (agent: BackgroundAgent, abortController?: AbortController) => void;
   updateAgent: (id: string, update: Partial<BackgroundAgent>) => void;
   removeAgent: (id: string) => void;
   selectAgent: (id: string | null) => void;
@@ -66,19 +67,30 @@ export type BackgroundAgentsState = {
   // User interaction
   answerQuestion: (agentId: string, answer: string) => void;
   sendUserMessage: (agentId: string, message: string) => void;
+
+  // Termination
+  terminateAgent: (agentId: string) => void;
 };
 
 export const useBackgroundAgentsStore = create<BackgroundAgentsState>((set, get) => ({
   agents: new Map(),
+  abortControllers: new Map(),
   selectedAgentId: null,
   panelVisible: false,
 
-  addAgent: agent => {
+  addAgent: (agent, abortController) => {
     set(state => {
       const newAgents = new Map(state.agents);
       newAgents.set(agent.id, agent);
+
+      const newAbortControllers = new Map(state.abortControllers);
+      if (abortController) {
+        newAbortControllers.set(agent.id, abortController);
+      }
+
       return {
         agents: newAgents,
+        abortControllers: newAbortControllers,
         // Auto-select first agent if none selected
         selectedAgentId: state.selectedAgentId ?? agent.id,
       };
@@ -101,6 +113,9 @@ export const useBackgroundAgentsStore = create<BackgroundAgentsState>((set, get)
       const newAgents = new Map(state.agents);
       newAgents.delete(id);
 
+      const newAbortControllers = new Map(state.abortControllers);
+      newAbortControllers.delete(id);
+
       // Update selection if removed agent was selected
       let newSelectedId = state.selectedAgentId;
       if (state.selectedAgentId === id) {
@@ -110,6 +125,7 @@ export const useBackgroundAgentsStore = create<BackgroundAgentsState>((set, get)
 
       return {
         agents: newAgents,
+        abortControllers: newAbortControllers,
         selectedAgentId: newSelectedId,
         panelVisible: newAgents.size > 0 ? state.panelVisible : false,
       };
@@ -233,6 +249,44 @@ export const useBackgroundAgentsStore = create<BackgroundAgentsState>((set, get)
     });
     // Note: Actually injecting user message into subagent would require
     // more complex architecture (message queue, etc.)
+  },
+
+  terminateAgent: agentId => {
+    const { agents, abortControllers } = get();
+    const agent = agents.get(agentId);
+    const abortController = abortControllers.get(agentId);
+
+    if (!agent || agent.status !== "running") return;
+
+    // Abort the agent's execution
+    if (abortController) {
+      abortController.abort();
+    }
+
+    // Update agent status with partial results
+    set(state => {
+      const ag = state.agents.get(agentId);
+      if (!ag) return state;
+
+      const newAgents = new Map(state.agents);
+      newAgents.set(agentId, {
+        ...ag,
+        status: "failed",
+        endTime: Date.now(),
+        error: "Terminated by user",
+        output: ag.streamingContent
+          ? `[Partial output before termination]\n\n${ag.streamingContent}`
+          : undefined,
+      });
+
+      const newAbortControllers = new Map(state.abortControllers);
+      newAbortControllers.delete(agentId);
+
+      return {
+        agents: newAgents,
+        abortControllers: newAbortControllers,
+      };
+    });
   },
 }));
 

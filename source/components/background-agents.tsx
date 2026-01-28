@@ -1,6 +1,7 @@
-import React from "react";
+import React, { useState } from "react";
 import { Box, Text, useInput } from "ink";
 import Spinner from "./ink/spinner.tsx";
+import TextInput from "./text-input.tsx";
 import { useColor } from "../theme.ts";
 import {
   useBackgroundAgentsStore,
@@ -36,9 +37,11 @@ export function BackgroundAgentsIndicator({ focused }: { focused: boolean }) {
 
   const completedCount = agents.filter(a => a.status === "completed").length;
   const failedCount = agents.filter(a => a.status === "failed").length;
+  const waitingCount = agents.filter(a => a.status === "waiting_for_user").length;
 
   const statusParts: string[] = [];
   if (runningCount > 0) statusParts.push(`${runningCount} running`);
+  if (waitingCount > 0) statusParts.push(`${waitingCount} waiting`);
   if (completedCount > 0) statusParts.push(`${completedCount} done`);
   if (failedCount > 0) statusParts.push(`${failedCount} failed`);
 
@@ -80,17 +83,33 @@ export function BackgroundAgentsIndicator({ focused }: { focused: boolean }) {
  * Expanded panel showing all agents with tabbed interface.
  * Left/Right arrows switch between agents.
  * Shows agent output/status in detail.
+ *
+ * When an agent is waiting for user input, shows an input field.
  */
 export function BackgroundAgentsPanel({ focused }: { focused: boolean }) {
   const agents = useBackgroundAgents();
   const selectedAgent = useSelectedAgent();
-  const { selectNextAgent, selectPrevAgent, hidePanel, panelVisible, removeAgent } =
-    useBackgroundAgentsStore();
+  const {
+    selectNextAgent,
+    selectPrevAgent,
+    hidePanel,
+    panelVisible,
+    removeAgent,
+    answerQuestion,
+    terminateAgent,
+  } = useBackgroundAgentsStore();
   const themeColor = useColor();
+  const [answerInput, setAnswerInput] = useState("");
 
-  // Handle keyboard navigation
+  // Track if we're in input mode (answering a question)
+  const isAnswering =
+    selectedAgent?.status === "waiting_for_user" && selectedAgent?.pendingQuestion;
+
+  // Handle keyboard navigation (disabled when answering)
   useInput(
     (input, key) => {
+      if (isAnswering) return; // Let TextInput handle input when answering
+
       if (key.rightArrow || input === "l") {
         selectNextAgent();
       } else if (key.leftArrow || input === "h") {
@@ -100,10 +119,20 @@ export function BackgroundAgentsPanel({ focused }: { focused: boolean }) {
       } else if (input === "d" && selectedAgent && selectedAgent.status !== "running") {
         // Dismiss completed/failed agent
         removeAgent(selectedAgent.id);
+      } else if (input === "t" && selectedAgent && selectedAgent.status === "running") {
+        // Terminate running agent
+        terminateAgent(selectedAgent.id);
       }
     },
-    { isActive: focused && panelVisible },
+    { isActive: focused && panelVisible && !isAnswering },
   );
+
+  const handleAnswerSubmit = () => {
+    if (selectedAgent && answerInput.trim()) {
+      answerQuestion(selectedAgent.id, answerInput.trim());
+      setAnswerInput("");
+    }
+  };
 
   if (!panelVisible || agents.length === 0) return null;
 
@@ -126,11 +155,23 @@ export function BackgroundAgentsPanel({ focused }: { focused: boolean }) {
           />
         ))}
         <Box flexGrow={1} />
-        <Text dimColor>←/→ switch | q close | d dismiss</Text>
+        <Text dimColor>
+          {isAnswering
+            ? "Type answer + Enter | Esc cancel"
+            : "←/→ switch | t terminate | d dismiss | q close"}
+        </Text>
       </Box>
 
       {/* Selected agent details */}
-      {selectedAgent && <AgentDetails agent={selectedAgent} />}
+      {selectedAgent && (
+        <AgentDetails
+          agent={selectedAgent}
+          answerInput={answerInput}
+          setAnswerInput={setAnswerInput}
+          onSubmitAnswer={handleAnswerSubmit}
+          focused={focused}
+        />
+      )}
     </Box>
   );
 }
@@ -170,7 +211,19 @@ function AgentTab({
   );
 }
 
-function AgentDetails({ agent }: { agent: BackgroundAgent }) {
+function AgentDetails({
+  agent,
+  answerInput,
+  setAnswerInput,
+  onSubmitAnswer,
+  focused,
+}: {
+  agent: BackgroundAgent;
+  answerInput: string;
+  setAnswerInput: (value: string) => void;
+  onSubmitAnswer: () => void;
+  focused: boolean;
+}) {
   const themeColor = useColor();
 
   const duration = agent.endTime
@@ -186,6 +239,8 @@ function AgentDetails({ agent }: { agent: BackgroundAgent }) {
         : agent.status === "completed"
           ? "green"
           : "red";
+
+  const isWaiting = agent.status === "waiting_for_user" && agent.pendingQuestion;
 
   return (
     <Box flexDirection="column">
@@ -253,15 +308,25 @@ function AgentDetails({ agent }: { agent: BackgroundAgent }) {
       )}
 
       {/* Pending question (waiting for user) */}
-      {agent.status === "waiting_for_user" && agent.pendingQuestion && (
+      {isWaiting && (
         <Box marginTop={1} flexDirection="column">
           <Text bold color="yellow">
             Agent is asking:
           </Text>
-          <Box paddingLeft={1}>
-            <Text color="yellow">{agent.pendingQuestion.question}</Text>
+          <Box paddingLeft={1} marginBottom={1}>
+            <Text color="yellow">{agent.pendingQuestion!.question}</Text>
           </Box>
-          <Text dimColor>Type your answer and press Enter</Text>
+
+          {/* Answer input field */}
+          <Box borderStyle="round" borderColor="yellow" paddingX={1}>
+            <Text color="gray">&gt; </Text>
+            <TextInput
+              value={answerInput}
+              onChange={setAnswerInput}
+              onSubmit={onSubmitAnswer}
+              focus={focused}
+            />
+          </Box>
         </Box>
       )}
 

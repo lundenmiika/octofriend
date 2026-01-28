@@ -118,6 +118,9 @@ The subagent cannot spawn other subagents (max depth = 1).`,
         const outputDir = await getOutputDir();
         const outputFile = path.join(outputDir, `${agentId}.txt`);
 
+        // Create abort controller for this agent (allows early termination)
+        const agentAbortController = new AbortController();
+
         // Initialize output file
         await fs.writeFile(
           outputFile,
@@ -136,7 +139,7 @@ The subagent cannot spawn other subagents (max depth = 1).`,
         };
 
         const store = useBackgroundAgentsStore.getState();
-        store.addAgent(bgAgent);
+        store.addAgent(bgAgent, agentAbortController);
 
         // Start the agent in background (don't await)
         (async () => {
@@ -144,12 +147,23 @@ The subagent cannot spawn other subagents (max depth = 1).`,
             const result = await runSubagent({
               agent,
               task: prompt,
-              signal,
+              signal: agentAbortController.signal, // Use agent-specific abort signal
               transport,
               config,
               modelOverride: effectiveModelOverride,
               backgroundAgentId: agentId, // Enable streaming updates
             });
+
+            // Check if we were terminated (store already updated status)
+            const currentAgent = useBackgroundAgentsStore.getState().agents.get(agentId);
+            if (currentAgent?.status === "failed" && currentAgent?.error === "Terminated by user") {
+              // Already handled by terminateAgent
+              await fs.appendFile(
+                outputFile,
+                `\n--- Result ---\nStatus: terminated\nTerminated: ${new Date().toISOString()}\n\n${currentAgent.output || "No partial output"}`,
+              );
+              return;
+            }
 
             const endTime = Date.now();
             const status = result.success ? "completed" : "failed";
@@ -168,6 +182,12 @@ The subagent cannot spawn other subagents (max depth = 1).`,
               `\n--- Result ---\nStatus: ${status}\nCompleted: ${new Date().toISOString()}\n\n${result.success ? result.summary : `Error: ${result.error}`}`,
             );
           } catch (e) {
+            // Check if aborted by user
+            if (agentAbortController.signal.aborted) {
+              // Termination handled by terminateAgent action
+              return;
+            }
+
             const errorMsg = e instanceof Error ? e.message : String(e);
 
             // Update store
@@ -187,7 +207,8 @@ The subagent cannot spawn other subagents (max depth = 1).`,
 Agent ID: ${agentId}
 Output file: ${outputFile}
 
-The agent is now running in the background. Check the status bar below for progress.`,
+The agent is now running in the background. Check the status bar below for progress.
+Press Ctrl+B to focus on agents panel, then 't' to terminate if needed.`,
         };
       }
 
