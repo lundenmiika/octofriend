@@ -5,6 +5,11 @@ import { discoverAgents, Agent } from "../../agents/agents.ts";
 import { runSubagent, canSpawnSubagent } from "../../agents/runner.ts";
 import { useBackgroundAgentsStore, BackgroundAgent } from "../../agents/background-store.ts";
 import { startWatchdog, isWatchdogRunning } from "../../agents/watchdog.ts";
+import {
+  useCoordinationStore,
+  TaskContract,
+  generateCoordinationInstructions,
+} from "../../agents/coordination.ts";
 import * as fs from "fs/promises";
 import * as path from "path";
 import * as os from "os";
@@ -60,6 +65,23 @@ export default defineTool(async function (signal, transport, config) {
     run_in_background: t.optional(
       t.bool.comment("Run agent in background. Returns immediately with agent ID."),
     ),
+    // Coordination parameters - CRITICAL for parallel agents
+    allowed_write_paths: t.optional(
+      t
+        .array(t.str)
+        .comment(
+          "File paths/globs this agent MAY write to. Other paths are forbidden. Use for parallel safety.",
+        ),
+    ),
+    forbidden_paths: t.optional(
+      t.array(t.str).comment("File paths/globs this agent must NOT touch (read or write)."),
+    ),
+    read_only: t.optional(
+      t.bool.comment("If true, agent cannot modify any files. Use for exploration tasks."),
+    ),
+    restrictions: t.optional(
+      t.array(t.str).comment("Additional restrictions/boundaries for this task."),
+    ),
   });
 
   const Schema = t
@@ -80,14 +102,22 @@ Parameters:
 - model: Optional model override (sonnet, opus, haiku)
 - run_in_background: If true, runs async and returns agent ID immediately
 
-Use this tool when:
-- The task requires multiple steps or exploration
-- You need specialized analysis (code review, testing, etc.)
-- You want to delegate work to a focused agent
+Coordination parameters (IMPORTANT for parallel agents):
+- allowed_write_paths: Array of file paths/globs the agent MAY write to. CRITICAL for parallel safety!
+- forbidden_paths: Array of paths the agent must not touch
+- read_only: If true, agent cannot modify any files (use for exploration)
+- restrictions: Additional boundaries/rules for the agent
 
-Use run_in_background=true when:
-- You want to run multiple agents in parallel
-- The task doesn't block your current work
+PARALLEL AGENT SAFETY:
+When running multiple agents in parallel, you MUST:
+1. Assign non-overlapping allowed_write_paths to each agent
+2. Use read_only=true for exploration agents
+3. List paths being modified by siblings in forbidden_paths
+4. Keep tasks focused and scoped
+
+Example for safe parallelization:
+- Agent A: allowed_write_paths=["src/components/**"], forbidden_paths=["src/utils/**"]
+- Agent B: allowed_write_paths=["src/utils/**"], forbidden_paths=["src/components/**"]
 
 The subagent cannot spawn other subagents (max depth = 1).`,
     );
@@ -99,7 +129,17 @@ The subagent cannot spawn other subagents (max depth = 1).`,
       return null;
     },
     async run(signal, transport, call, config, modelOverride) {
-      const { subagent_type, description, prompt, model, run_in_background } = call.arguments;
+      const {
+        subagent_type,
+        description,
+        prompt,
+        model,
+        run_in_background,
+        allowed_write_paths,
+        forbidden_paths,
+        read_only,
+        restrictions,
+      } = call.arguments;
 
       const agent = agents.find(a => a.name.toLowerCase() === subagent_type.toLowerCase());
 
@@ -113,9 +153,47 @@ The subagent cannot spawn other subagents (max depth = 1).`,
       const effectiveModelOverride =
         model || (agent.model !== "inherit" ? agent.model : null) || modelOverride;
 
+      // Create task contract for coordination
+      const agentId = generateAgentId();
+      const coordinationStore = useCoordinationStore.getState();
+
+      // Get sibling context (other active agents)
+      const siblingContext = coordinationStore.getSiblingContext(agentId);
+
+      const contract: TaskContract = {
+        taskId: `${agent.name}-${agentId}`,
+        objective: description,
+        allowedWritePaths: allowed_write_paths,
+        forbiddenPaths: forbidden_paths,
+        readOnly: read_only ?? false,
+        restrictions: restrictions,
+        siblingContext: siblingContext.length > 0 ? siblingContext : undefined,
+      };
+
+      // Register contract
+      coordinationStore.registerContract(agentId, contract);
+
+      // Try to acquire file ownership if write paths specified
+      if (allowed_write_paths && allowed_write_paths.length > 0) {
+        const acquired = coordinationStore.acquireFiles(agentId, agent.name, allowed_write_paths);
+        if (!acquired) {
+          coordinationStore.removeContract(agentId);
+          return {
+            content: `Error: Could not acquire file ownership for paths: ${allowed_write_paths.join(", ")}. Another agent may be working on these files.`,
+          };
+        }
+      }
+
+      // Generate coordination instructions to inject into the prompt
+      const coordinationInstructions = generateCoordinationInstructions(contract);
+
+      // Combine prompt with coordination instructions
+      const enhancedPrompt = coordinationInstructions
+        ? `${prompt}\n\n---\n\n${coordinationInstructions}`
+        : prompt;
+
       // Background execution mode
       if (run_in_background) {
-        const agentId = generateAgentId();
         const outputDir = await getOutputDir();
         const outputFile = path.join(outputDir, `${agentId}.txt`);
 
@@ -159,7 +237,7 @@ The subagent cannot spawn other subagents (max depth = 1).`,
           try {
             const result = await runSubagent({
               agent,
-              task: prompt,
+              task: enhancedPrompt, // Use prompt with coordination instructions
               signal: agentAbortController.signal, // Use agent-specific abort signal
               transport,
               config,
@@ -212,6 +290,9 @@ The subagent cannot spawn other subagents (max depth = 1).`,
 
             // Update output file
             await fs.appendFile(outputFile, `\n--- Result ---\nStatus: failed\nError: ${errorMsg}`);
+          } finally {
+            // Clean up coordination contract
+            coordinationStore.removeContract(agentId);
           }
         })();
 
@@ -226,26 +307,31 @@ Press Ctrl+B to focus on agents panel, then 't' to terminate if needed.`,
       }
 
       // Synchronous execution (default)
-      const result = await runSubagent({
-        agent,
-        task: prompt,
-        signal,
-        transport,
-        config,
-        modelOverride: effectiveModelOverride,
-      });
+      try {
+        const result = await runSubagent({
+          agent,
+          task: enhancedPrompt, // Use prompt with coordination instructions
+          signal,
+          transport,
+          config,
+          modelOverride: effectiveModelOverride,
+        });
 
-      if (!result.success) {
+        if (!result.success) {
+          return {
+            content: `Subagent "${agent.name}" failed: ${result.error || "Unknown error"}`,
+          };
+        }
+
         return {
-          content: `Subagent "${agent.name}" failed: ${result.error || "Unknown error"}`,
-        };
-      }
-
-      return {
-        content: `[Subagent: ${agent.name}] Task: ${description}
+          content: `[Subagent: ${agent.name}] Task: ${description}
 
 ${result.summary}`,
-      };
+        };
+      } finally {
+        // Clean up coordination contract
+        coordinationStore.removeContract(agentId);
+      }
     },
   } satisfies ToolDef<t.GetType<typeof Schema>>;
 });
