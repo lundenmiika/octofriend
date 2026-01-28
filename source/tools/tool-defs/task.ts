@@ -4,6 +4,7 @@ import { defineTool, ToolDef } from "../common.ts";
 import { discoverAgents, Agent } from "../../agents/agents.ts";
 import { runSubagent, canSpawnSubagent } from "../../agents/runner.ts";
 import { useBackgroundAgentsStore, BackgroundAgent } from "../../agents/background-store.ts";
+import { startWatchdog, isWatchdogRunning } from "../../agents/watchdog.ts";
 import * as fs from "fs/promises";
 import * as path from "path";
 import * as os from "os";
@@ -140,6 +141,17 @@ The subagent cannot spawn other subagents (max depth = 1).`,
 
         const store = useBackgroundAgentsStore.getState();
         store.addAgent(bgAgent, agentAbortController);
+
+        // Start watchdog if not already running (monitors agent health)
+        if (!isWatchdogRunning()) {
+          startWatchdog({
+            checkIntervalMs: 30_000, // Check every 30 seconds
+            noProgressThresholdMs: 60_000, // 1 minute no progress = warning
+            toolStuckThresholdMs: 120_000, // 2 minutes on same tool = warning
+            stallAction: "escalate", // Show panel and alert user
+            maxConsecutiveStalls: 3, // Auto-terminate after 3 stalls
+          });
+        }
 
         // Start the agent in background (don't await)
         (async () => {

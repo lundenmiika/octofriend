@@ -9,6 +9,7 @@ import { LoadedTools, loadTools } from "../tools/index.ts";
 import { ToolDef } from "../tools/common.ts";
 import { t, toTypescript } from "structural";
 import { useBackgroundAgentsStore, AgentQuestion } from "./background-store.ts";
+import { recordAgentProgress } from "./watchdog.ts";
 import { randomUUID } from "crypto";
 
 // Global flag to track if we're inside a subagent context
@@ -121,6 +122,9 @@ export async function runSubagent({
                 streamingContent: event.buffer.content || event.buffer.reasoning || "",
               });
               lastStreamUpdate = now;
+
+              // Record progress for watchdog health monitoring
+              recordAgentProgress(backgroundAgentId);
             }
           }
         },
