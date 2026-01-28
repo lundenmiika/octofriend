@@ -12,16 +12,89 @@ import { useBackgroundAgentsStore, AgentQuestion } from "./background-store.ts";
 import { recordAgentProgress, recordToolCall } from "./watchdog.ts";
 import { randomUUID } from "crypto";
 
-// Global flag to track if we're inside a subagent context
+/**
+ * Subagent depth configuration
+ *
+ * Depth 1 (default): Parent can spawn subagents, subagents cannot spawn
+ * Depth 2: Allows one level of nested subagents (parent -> child -> grandchild)
+ * Depth 3+: Deep hierarchies - USE WITH CAUTION due to coordination complexity
+ *
+ * The "curse of coordination" research shows parallel agents have 30-50% lower
+ * success rates. Deeper nesting compounds this risk. Mitigations:
+ * - Deeper agents MUST have stricter scope restrictions
+ * - Each level should have non-overlapping file ownership
+ * - Consider sequential over parallel for nested work
+ */
+export type SubagentDepthConfig = {
+  /** Maximum nesting depth (default: 1) */
+  maxDepth: number;
+  /** Require allowed_write_paths for agents at depth > 1 */
+  requireScopeAtDepth: number;
+  /** Force read-only mode at this depth and beyond */
+  forceReadOnlyAtDepth: number | null;
+};
+
+const DEFAULT_DEPTH_CONFIG: SubagentDepthConfig = {
+  maxDepth: 1,
+  requireScopeAtDepth: 2, // Depth 2+ requires explicit write paths
+  forceReadOnlyAtDepth: null, // Don't force read-only by default
+};
+
+// Global state for depth tracking
 let subagentDepth = 0;
-const MAX_SUBAGENT_DEPTH = 1;
+let depthConfig: SubagentDepthConfig = DEFAULT_DEPTH_CONFIG;
+let agentHierarchy: string[] = []; // Track parent chain for debugging
+
+/**
+ * Configure subagent depth settings
+ */
+export function configureSubagentDepth(config: Partial<SubagentDepthConfig>): void {
+  depthConfig = { ...depthConfig, ...config };
+}
+
+/**
+ * Get current depth configuration
+ */
+export function getSubagentDepthConfig(): SubagentDepthConfig {
+  return { ...depthConfig };
+}
+
+/**
+ * Get current subagent depth (0 = top level)
+ */
+export function getCurrentDepth(): number {
+  return subagentDepth;
+}
+
+/**
+ * Get the current agent hierarchy (for debugging)
+ */
+export function getAgentHierarchy(): string[] {
+  return [...agentHierarchy];
+}
 
 export function isInSubagentContext(): boolean {
   return subagentDepth > 0;
 }
 
 export function canSpawnSubagent(): boolean {
-  return subagentDepth < MAX_SUBAGENT_DEPTH;
+  return subagentDepth < depthConfig.maxDepth;
+}
+
+/**
+ * Check if scope restrictions are required at current depth
+ */
+export function requiresScopeRestriction(): boolean {
+  return subagentDepth >= depthConfig.requireScopeAtDepth;
+}
+
+/**
+ * Check if agents at current depth should be forced to read-only
+ */
+export function isForceReadOnly(): boolean {
+  return (
+    depthConfig.forceReadOnlyAtDepth !== null && subagentDepth >= depthConfig.forceReadOnlyAtDepth
+  );
 }
 
 export type SubagentResult = {
@@ -48,7 +121,7 @@ type RunSubagentParams = {
  * - Uses its own system prompt (from the agent definition)
  * - Has an isolated conversation history (just the task)
  * - Can use only the tools specified in the agent definition
- * - Cannot spawn other subagents (depth limit = 1)
+ * - Depth is configurable via configureSubagentDepth()
  */
 export async function runSubagent({
   agent,
@@ -60,15 +133,25 @@ export async function runSubagent({
   backgroundAgentId,
 }: RunSubagentParams): Promise<SubagentResult> {
   if (!canSpawnSubagent()) {
+    const currentDepth = getCurrentDepth();
+    const maxDepth = depthConfig.maxDepth;
     return {
       success: false,
       summary: "",
-      error: "Subagents cannot spawn other subagents (max depth reached)",
+      error:
+        `Cannot spawn subagent: max depth ${maxDepth} reached (current depth: ${currentDepth}). ` +
+        `Hierarchy: ${agentHierarchy.join(" → ") || "root"}. ` +
+        `Use configureSubagentDepth() to allow deeper nesting if needed.`,
     };
   }
 
-  // Increment depth to prevent nested subagent spawning
+  // Track hierarchy for debugging
+  const agentLabel = backgroundAgentId ? `${agent.name}[${backgroundAgentId}]` : agent.name;
+  agentHierarchy.push(agentLabel);
+
+  // Increment depth
   subagentDepth++;
+  const currentDepth = subagentDepth;
 
   // Get store for streaming updates (if background agent)
   const store = backgroundAgentId ? useBackgroundAgentsStore.getState() : null;
@@ -161,6 +244,7 @@ export async function runSubagent({
           transport,
           tools: filteredTools,
           signal,
+          depth: currentDepth,
         });
       },
       customTools: filteredTools,
@@ -200,8 +284,9 @@ export async function runSubagent({
       error: e instanceof Error ? e.message : String(e),
     };
   } finally {
-    // Always decrement depth when done
+    // Always decrement depth and clean up hierarchy when done
     subagentDepth--;
+    agentHierarchy.pop();
   }
 }
 
@@ -253,18 +338,33 @@ async function generateSubagentSystemPrompt({
   transport,
   tools,
   signal,
+  depth,
 }: {
   agent: Agent;
   config: Config;
   transport: Transport;
   tools: Partial<LoadedTools>;
   signal: AbortSignal;
+  depth: number;
 }): Promise<string> {
   const pwd = await transport.shell(signal, "pwd", 5000);
 
   const toolDocs = Object.entries(tools)
     .map(([_, tool]) => toTypescript(tool.Schema))
     .join("\n\n");
+
+  // Depth-specific context
+  const depthContext =
+    depth > 1
+      ? `\n\n**IMPORTANT**: You are a nested subagent at depth ${depth}. ` +
+        `Keep your work tightly scoped and focused. Do not spawn additional subagents unless absolutely necessary.`
+      : "";
+
+  // Whether this agent can spawn subagents
+  const canSpawn = depth < depthConfig.maxDepth;
+  const spawnNote = canSpawn
+    ? `- You can spawn subagents (depth ${depth + 1}/${depthConfig.maxDepth}) for complex subtasks`
+    : "- You cannot spawn other subagents (max depth reached)";
 
   return `
 You are a subagent named "${agent.name}".
@@ -273,8 +373,8 @@ ${agent.prompt}
 
 # Context
 
-You are running as a subagent, delegated a specific task by the main agent.
-Your job is to complete this task and return a useful summary.
+You are running as a subagent at depth ${depth}/${depthConfig.maxDepth}, delegated a specific task.
+Your job is to complete this task and return a useful summary.${depthContext}
 
 # Tools
 
@@ -287,9 +387,10 @@ ${toolDocs}
 - Focus on completing the delegated task
 - Be thorough but efficient
 - Return a clear, actionable summary of your findings or actions
-- You cannot spawn other subagents
+${spawnNote}
 - If you are truly blocked and need user input, use the ask_user tool (if available)
 - Prefer making reasonable assumptions over asking questions - only ask when truly necessary
+${depth > 1 ? "- As a nested agent, keep your scope extremely focused\n- Do not modify files outside your assigned scope" : ""}
 
 # Current working directory
 ${pwd}
