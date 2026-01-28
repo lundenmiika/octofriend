@@ -52,7 +52,7 @@ export const BUILTIN_AGENTS: Agent[] = [
   {
     name: "Explore",
     description:
-      "Fast agent for exploring codebases. Use for file discovery, code search, and answering questions about the codebase structure.",
+      "Fast agent for exploring codebases. Use PROACTIVELY when searching for files, understanding code structure, or finding relevant code. Ideal for quick lookups.",
     tools: ["read", "list", "skill"],
     model: "haiku",
     prompt: `You are a fast codebase exploration agent. Your job is to quickly find files, search code, and answer questions about codebase structure.
@@ -69,7 +69,7 @@ Be thorough but efficient. Return focused, actionable results.`,
   {
     name: "Plan",
     description:
-      "Software architect agent for designing implementation plans. Use for planning implementation strategy.",
+      "Software architect agent for designing implementation plans. Use when asked to plan, design, or architect a feature before implementing.",
     tools: ["read", "list", "skill"],
     model: "inherit",
     prompt: `You are a software architect agent. Your job is to design implementation plans for tasks.
@@ -89,7 +89,8 @@ Return structured plans with:
   },
   {
     name: "general-purpose",
-    description: "General-purpose agent for complex, multi-step tasks. Has access to all tools.",
+    description:
+      "General-purpose agent for complex, multi-step tasks. Has access to all tools. Use for tasks that require multiple operations or extended work.",
     model: "inherit",
     prompt: `You are a general-purpose coding agent. You can handle complex, multi-step tasks autonomously.
 
@@ -105,7 +106,7 @@ Return a summary of what you accomplished.`,
   {
     name: "Bash",
     description:
-      "Command execution specialist for running bash commands, git operations, and terminal tasks.",
+      "Command execution specialist for running bash commands, git operations, and terminal tasks. Use for build commands, tests, or shell operations.",
     tools: ["shell"],
     model: "inherit",
     prompt: `You are a command execution specialist. Your job is to run bash commands to accomplish tasks.
