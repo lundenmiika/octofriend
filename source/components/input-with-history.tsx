@@ -12,52 +12,57 @@ interface Props {
   vimEnabled?: boolean;
   vimMode?: "NORMAL" | "INSERT";
   setVimMode?: (mode: "NORMAL" | "INSERT") => void;
+  focus?: boolean;
 }
 
 export const InputWithHistory = React.memo((props: Props) => {
   const themeColor = useColor();
   const [currentIndex, setCurrentIndex] = useState(-1);
   const [originalInput, setOriginalInput] = useState("");
+  const focus = props.focus ?? true;
 
-  useInput((input, key) => {
-    if (key.upArrow) {
-      if (currentIndex === -1) {
-        setOriginalInput(props.value);
-      }
+  useInput(
+    (input, key) => {
+      if (key.upArrow) {
+        if (currentIndex === -1) {
+          setOriginalInput(props.value);
+        }
 
-      const history = props.inputHistory.getCurrentHistory();
-      if (history.length === 0) return;
+        const history = props.inputHistory.getCurrentHistory();
+        if (history.length === 0) return;
 
-      const newIndex = currentIndex === -1 ? history.length - 1 : Math.max(0, currentIndex - 1);
-      setCurrentIndex(newIndex);
-      props.onChange(history[newIndex]);
-      return;
-    }
-
-    if (key.downArrow) {
-      const history = props.inputHistory.getCurrentHistory();
-      if (currentIndex === -1 || history.length === 0) return;
-
-      if (currentIndex < history.length - 1) {
-        const newIndex = currentIndex + 1;
+        const newIndex = currentIndex === -1 ? history.length - 1 : Math.max(0, currentIndex - 1);
         setCurrentIndex(newIndex);
         props.onChange(history[newIndex]);
-      } else {
-        // Reset to original input
-        setCurrentIndex(-1);
-        props.onChange(originalInput);
+        return;
       }
-      return;
-    }
 
-    // Reset navigation state when user types anything else
-    if (input || key.return || key.escape || key.backspace || key.delete) {
-      if (currentIndex !== -1) {
-        setCurrentIndex(-1);
-        setOriginalInput("");
+      if (key.downArrow) {
+        const history = props.inputHistory.getCurrentHistory();
+        if (currentIndex === -1 || history.length === 0) return;
+
+        if (currentIndex < history.length - 1) {
+          const newIndex = currentIndex + 1;
+          setCurrentIndex(newIndex);
+          props.onChange(history[newIndex]);
+        } else {
+          // Reset to original input
+          setCurrentIndex(-1);
+          props.onChange(originalInput);
+        }
+        return;
       }
-    }
-  });
+
+      // Reset navigation state when user types anything else
+      if (input || key.return || key.escape || key.backspace || key.delete) {
+        if (currentIndex !== -1) {
+          setCurrentIndex(-1);
+          setOriginalInput("");
+        }
+      }
+    },
+    { isActive: focus },
+  );
 
   const handleSubmit = () => {
     if (props.value.trim()) {
@@ -87,6 +92,7 @@ export const InputWithHistory = React.memo((props: Props) => {
         vimEnabled={props.vimEnabled}
         vimMode={props.vimMode}
         setVimMode={props.setVimMode}
+        focus={focus}
       />
     </Box>
   );

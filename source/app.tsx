@@ -48,6 +48,11 @@ import { useAppStore, RunArgs, useModel, InflightResponseType } from "./state.ts
 import { Octo } from "./components/octo.tsx";
 import { Menu } from "./menu.tsx";
 import SelectInput from "./components/ink/select-input.tsx";
+import {
+  BackgroundAgentsIndicator,
+  BackgroundAgentsPanel,
+} from "./components/background-agents.tsx";
+import { useBackgroundAgentsStore, useBackgroundAgents } from "./agents/background-store.ts";
 import { IndicatorComponent, ItemComponent } from "./components/select.tsx";
 import { displayLog } from "./logger.ts";
 import { CenteredBox } from "./components/centered-box.tsx";
@@ -220,6 +225,7 @@ function BottomBar({
   const [versionCheck, setVersionCheck] = useState("Checking for updates...");
   const [displayedTempNotification, setDisplayedTempNotification] =
     useState<React.ReactNode | null>(null);
+  const [agentsPanelFocused, setAgentsPanelFocused] = useState(false);
   const themeColor = useColor();
   const ctrlCPressed = useCtrlCPressed();
   const { modeData } = useAppStore(
@@ -227,6 +233,20 @@ function BottomBar({
       modeData: state.modeData,
     })),
   );
+  const backgroundAgents = useBackgroundAgents();
+  const { panelVisible, hidePanel } = useBackgroundAgentsStore();
+
+  // Handle Ctrl+B to toggle focus on agents panel
+  useInput((input, key) => {
+    if (key.ctrl && input === "b" && backgroundAgents.length > 0) {
+      setAgentsPanelFocused(prev => !prev);
+    }
+    // Escape unfocuses agents panel
+    if (key.escape && agentsPanelFocused) {
+      setAgentsPanelFocused(false);
+      if (panelVisible) hidePanel();
+    }
+  });
 
   useEffect(() => {
     getLatestVersion().then(latestVersion => {
@@ -254,13 +274,27 @@ function BottomBar({
     return undefined;
   }, [tempNotification]);
 
+  // Auto-unfocus when no agents
+  useEffect(() => {
+    if (backgroundAgents.length === 0 && agentsPanelFocused) {
+      setAgentsPanelFocused(false);
+    }
+  }, [backgroundAgents.length, agentsPanelFocused]);
+
   if (modeData.mode === "menu") return <Menu />;
 
   const unchained = useUnchained();
 
   return (
     <Box flexDirection="column" width="100%">
-      <BottomBarContent inputHistory={inputHistory} />
+      <BottomBarContent inputHistory={inputHistory} inputFocused={!agentsPanelFocused} />
+
+      {/* Background Agents Indicator - shown when agents exist */}
+      <BackgroundAgentsIndicator focused={agentsPanelFocused} />
+
+      {/* Background Agents Panel - expanded view */}
+      <BackgroundAgentsPanel focused={agentsPanelFocused} />
+
       <Box width="100%" justifyContent="space-between" height={1} flexShrink={0} flexGrow={1}>
         <Box height={1}>
           <Text color={themeColor}>{ctrlCPressed && "Press Ctrl+C again to exit."}</Text>
@@ -302,7 +336,13 @@ async function getLatestVersion() {
   }
 }
 
-function BottomBarContent({ inputHistory }: { inputHistory: InputHistory }) {
+function BottomBarContent({
+  inputHistory,
+  inputFocused = true,
+}: {
+  inputHistory: InputHistory;
+  inputFocused?: boolean;
+}) {
   const config = useConfig();
   const transport = useContext(TransportContext);
   const vimEnabled = !!config.vimEmulation?.enabled;
@@ -439,6 +479,7 @@ function BottomBarContent({ inputHistory }: { inputHistory: InputHistory }) {
         vimEnabled={vimEnabled}
         vimMode={vimMode}
         setVimMode={setVimMode}
+        focus={inputFocused}
       />
       <VimModeIndicator vimEnabled={vimEnabled} vimMode={vimMode} />
     </Box>

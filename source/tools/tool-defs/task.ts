@@ -3,22 +3,11 @@ import { unionAll } from "../../types.ts";
 import { defineTool, ToolDef } from "../common.ts";
 import { discoverAgents, Agent } from "../../agents/agents.ts";
 import { runSubagent, canSpawnSubagent } from "../../agents/runner.ts";
+import { useBackgroundAgentsStore, BackgroundAgent } from "../../agents/background-store.ts";
 import * as fs from "fs/promises";
 import * as path from "path";
 import * as os from "os";
 
-// Registry for tracking background agents
-type BackgroundAgent = {
-  id: string;
-  agentName: string;
-  description: string;
-  status: "running" | "completed" | "failed";
-  outputFile: string;
-  startTime: number;
-  promise?: Promise<void>;
-};
-
-const backgroundAgents = new Map<string, BackgroundAgent>();
 let agentIdCounter = 0;
 
 function generateAgentId(): string {
@@ -135,17 +124,22 @@ The subagent cannot spawn other subagents (max depth = 1).`,
           `Agent: ${agent.name}\nTask: ${description}\nStatus: running\nStarted: ${new Date().toISOString()}\n\n--- Output ---\n`,
         );
 
+        // Add to the shared store for UI visibility
         const bgAgent: BackgroundAgent = {
           id: agentId,
           agentName: agent.name,
           description,
+          task: prompt,
           status: "running",
           outputFile,
           startTime: Date.now(),
         };
 
+        const store = useBackgroundAgentsStore.getState();
+        store.addAgent(bgAgent);
+
         // Start the agent in background (don't await)
-        bgAgent.promise = (async () => {
+        (async () => {
           try {
             const result = await runSubagent({
               agent,
@@ -156,28 +150,43 @@ The subagent cannot spawn other subagents (max depth = 1).`,
               modelOverride: effectiveModelOverride,
             });
 
-            bgAgent.status = result.success ? "completed" : "failed";
+            const endTime = Date.now();
+            const status = result.success ? "completed" : "failed";
+
+            // Update store
+            store.updateAgent(agentId, {
+              status,
+              endTime,
+              output: result.success ? result.summary : undefined,
+              error: result.success ? undefined : result.error,
+            });
+
+            // Update output file
             await fs.appendFile(
               outputFile,
-              `\n--- Result ---\nStatus: ${bgAgent.status}\nCompleted: ${new Date().toISOString()}\n\n${result.success ? result.summary : `Error: ${result.error}`}`,
+              `\n--- Result ---\nStatus: ${status}\nCompleted: ${new Date().toISOString()}\n\n${result.success ? result.summary : `Error: ${result.error}`}`,
             );
           } catch (e) {
-            bgAgent.status = "failed";
-            await fs.appendFile(
-              outputFile,
-              `\n--- Result ---\nStatus: failed\nError: ${e instanceof Error ? e.message : String(e)}`,
-            );
+            const errorMsg = e instanceof Error ? e.message : String(e);
+
+            // Update store
+            store.updateAgent(agentId, {
+              status: "failed",
+              endTime: Date.now(),
+              error: errorMsg,
+            });
+
+            // Update output file
+            await fs.appendFile(outputFile, `\n--- Result ---\nStatus: failed\nError: ${errorMsg}`);
           }
         })();
-
-        backgroundAgents.set(agentId, bgAgent);
 
         return {
           content: `Background agent started.
 Agent ID: ${agentId}
 Output file: ${outputFile}
 
-Use the read tool on the output file to check progress, or check back later.`,
+The agent is now running in the background. Check the status bar below for progress.`,
         };
       }
 
@@ -205,12 +214,3 @@ ${result.summary}`,
     },
   } satisfies ToolDef<t.GetType<typeof Schema>>;
 });
-
-// Export for potential future use (checking agent status programmatically)
-export function getBackgroundAgent(id: string): BackgroundAgent | undefined {
-  return backgroundAgents.get(id);
-}
-
-export function listBackgroundAgents(): BackgroundAgent[] {
-  return Array.from(backgroundAgents.values());
-}
