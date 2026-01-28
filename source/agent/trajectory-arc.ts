@@ -86,6 +86,8 @@ export async function trajectoryArc({
   transport,
   abortSignal,
   handler,
+  customSystemPrompt,
+  customTools,
 }: {
   apiKey: string;
   model: ModelConfig;
@@ -96,13 +98,17 @@ export async function trajectoryArc({
   handler: {
     [K in AnyState]: (state: StateEvents[K]) => void;
   };
+  /** Optional custom system prompt generator for subagents */
+  customSystemPrompt?: () => Promise<string>;
+  /** Optional custom tools for subagents (overrides default tool loading) */
+  customTools?: Partial<Awaited<ReturnType<typeof loadTools>>>;
 }): Promise<Finish> {
   if (abortSignal.aborted) return abort([]);
 
   const messagesCopy = [...messages];
   const autofixJson = makeAutofixJson(config);
   let irs: TrajectoryOutputIR[] = [];
-  const tools = await loadTools(transport, abortSignal, config);
+  const tools = customTools ?? (await loadTools(transport, abortSignal, config));
 
   const parsedCompaction = await maybeAutocompact({
     apiKey,
@@ -146,14 +152,16 @@ export async function trajectoryArc({
         handler.autofixingJson(null);
       },
     },
-    systemPrompt: async () => {
-      return systemPrompt({
-        config,
-        transport,
-        tools,
-        signal: abortSignal,
-      });
-    },
+    systemPrompt:
+      customSystemPrompt ??
+      (async () => {
+        return systemPrompt({
+          config,
+          transport,
+          tools,
+          signal: abortSignal,
+        });
+      }),
   });
 
   function maybeBufferedMessage(): TrajectoryOutputIR[] {
@@ -212,6 +220,8 @@ export async function trajectoryArc({
       abortSignal,
       messages: messagesCopy.concat(irs),
       handler,
+      customSystemPrompt,
+      customTools,
     });
 
     return {
@@ -261,6 +271,8 @@ export async function trajectoryArc({
         abortSignal,
         messages: messagesCopy.concat(retryIrs),
         handler,
+        customSystemPrompt,
+        customTools,
       });
       return {
         type: "finish",
@@ -340,6 +352,8 @@ export async function trajectoryArc({
       abortSignal,
       messages: messagesCopy.concat(retryIrs),
       handler,
+      customSystemPrompt,
+      customTools,
     });
     return {
       type: "finish",

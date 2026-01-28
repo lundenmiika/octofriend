@@ -10,6 +10,7 @@ import prepend from "./prepend.ts";
 import rewrite from "./rewrite.ts";
 import skill from "./skill.ts";
 import webSearch from "./web-search.ts";
+import task from "./task.ts";
 
 export default {
   read,
@@ -23,5 +24,6 @@ export default {
   prepend,
   rewrite,
   skill,
+  task,
   "web-search": webSearch,
 };
