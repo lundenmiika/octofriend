@@ -9,7 +9,7 @@ import { LoadedTools, loadTools } from "../tools/index.ts";
 import { ToolDef } from "../tools/common.ts";
 import { t, toTypescript } from "structural";
 import { useBackgroundAgentsStore, AgentQuestion } from "./background-store.ts";
-import { recordAgentProgress } from "./watchdog.ts";
+import { recordAgentProgress, recordToolCall } from "./watchdog.ts";
 import { randomUUID } from "crypto";
 
 // Global flag to track if we're inside a subagent context
@@ -143,6 +143,12 @@ export async function runSubagent({
                 status: "running",
                 startTime: Date.now(),
               });
+
+              // Record tool call with params for watchdog loop detection
+              // Extract arguments from the tool call if available
+              const toolCall = "toolCall" in lastIr ? (lastIr as any).toolCall : undefined;
+              const args = toolCall?.function?.arguments ?? {};
+              recordToolCall(backgroundAgentId, lastIr.toolName, args as Record<string, unknown>);
             }
           }
         },

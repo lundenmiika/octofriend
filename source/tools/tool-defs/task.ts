@@ -146,8 +146,9 @@ The subagent cannot spawn other subagents (max depth = 1).`,
         if (!isWatchdogRunning()) {
           startWatchdog({
             checkIntervalMs: 30_000, // Check every 30 seconds
+            parentCheckInIntervalMs: 300_000, // Parent wake window every 5 minutes
             noProgressThresholdMs: 60_000, // 1 minute no progress = warning
-            toolStuckThresholdMs: 120_000, // 2 minutes on same tool = warning
+            sameToolCallThreshold: 3, // Same tool+params 3 times = stuck loop
             stallAction: "escalate", // Show panel and alert user
             maxConsecutiveStalls: 3, // Auto-terminate after 3 stalls
           });
